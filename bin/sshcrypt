@@ -1,0 +1,174 @@
+#! /usr/bin/perl
+use v5.10;
+use strict;
+use warnings;
+use Pod::Usage;
+use Getopt::Long;
+use POSIX 'dup2';
+
+our $VERSION= 0.001;
+
+=head1 USAGE
+
+  ssh-crypt [-e|-d] [-s SALT] [-k KEY_PATTERN] <INPUT >OUTPUT
+  ssh-crypt [-e|-d] [-s SALT] [-k KEY_PATTERN] INPUT_FILE >OUTPUT
+  ssh-encrypt [-s SALT] [-k KEY_PATTERN] PLAINTEXT_FILE >CIPHERTEXT
+  ssh-decrypt CIPHERTEXT_FILE >PLAINTEXT
+  
+  some_other_command <(ssh-decrypt ciphertext_file) etc etc
+
+Uses an ssh key from your ssh-agent to encrypt or decrypt a file.  For encryption, you should
+specify a SALT value, and if you have more than one key specify -k to select which one you want.
+
+=over
+
+=item -e | -d
+
+Select encryption or decryption mode
+
+=item -s SALT
+
+Specify a string that will be signed to create the encryption key
+
+=item -k KEY_PATTERN
+
+During encryption, if you have multiple keys available, this selects the one you want to use.
+
+=back
+
+=cut
+
+# specify all settings so openssl upgrades don't change encryption
+our @enc_opts= qw( -aes-256-cbc -md sha512 -pbkdf2 -iter 239823 );
+our $file_signature= sprintf("ssh-crypt %2.3f ", $VERSION);
+
+my $mode;
+GetOptions(
+  'e'      => sub { $mode= 'encrypt' },
+  'd'      => sub { $mode= 'decrypt' },
+  's=s'    => \(my $salt= time),
+  'k=s'    => \my $key_pattern,
+  'help|h' => sub { pod2usage(1) },
+) && @ARGV <= 1
+   or pod2usage(2);
+
+# They can specify a file to use instead of STDIN
+open STDIN, '<', $ARGV[0] or die "open('$ARGV[0]'): $!"
+   if @ARGV;
+
+# derive mode from the script name (when symlinked to these names)
+$mode ||= ($0 =~ /-(encrypt|decrypt)/)[0]
+   || pod2usage(-message => "Require '-e' or '-d' option");
+
+$mode eq 'encrypt'? encrypt() : decrypt();
+
+sub get_ssh_pubkey {
+   return $ENV{SSH_CRYPT_PUBKEY} if length $ENV{SSH_CRYPT_PUBKEY};
+   my @keys= `ssh-add -L`;
+   @keys= grep /$key_pattern/, @keys
+      if defined $key_pattern;
+   die "No ssh key ".(defined $key_pattern? "found matching pattern '$key_pattern'" : "available")
+      unless @keys;
+   my @usable= grep $_ !~ /^ecdsa/, @keys;
+   die "ecdsa keys cannot be used"
+      unless @usable;
+   die "More than one ssh_key found".(
+         defined $key_pattern? " matching pattern '$key_pattern'"
+         : "; use -k option or \$SSH_CRYPT_PUBKEY"
+      )."\n@keys"
+      if @usable > 1;
+   # Trim off the comment, in case it contains sensitive information
+   $usable[0] =~ s/^(\S+ \S+).*/$1/;
+   $usable[0]
+}   
+
+# Create symmetric key by signing $salt with the chosen SSH key.
+# Public key is provided, which causes ssh-keygen to consult ssh-agent for signing.
+sub create_secret {
+   my ($key, $message)= @_;
+   my @cmd= ( 'ssh-keygen', -Y => 'sign', -n => $salt, '-q', -f => "/dev/fd/3" );
+   my $signed= capture_cmd_with_fds([$message, undef, undef, $key], @cmd);
+}
+
+sub encrypt {
+   my $key= get_ssh_pubkey;
+   my $secret= create_secret($key, $salt);
+   # write header
+   $key =~ s/\r?\n?\z//;
+   my $header= "${file_signature}XXXX\n$key\n@enc_opts\n$salt\n";
+   substr($header, length $file_signature, 4, sprintf "%04X", length $header);
+   print $header;
+   # create a pipe and load it with the file-descriptor-3 data
+   $^F= 3; # pass fd 3 to child
+   my $fd3= load_string_into_pipe($secret);
+   dup2(fileno $fd3, 3);
+   # hand off to openssl to run directly on file handles
+   exec('openssl', 'enc', -e => @enc_opts, -pass => 'fd:3') or die "exec(openssl): $!";
+}
+
+sub decrypt {
+   # Attempt to read a precise number of bytes from stdin so that we can pass stdin
+   # on to the openssl command without needing to be a middleman.
+   my $goal= 4 + length $file_signature;
+   my $header= '';
+   while ($goal > length $header) {
+      sysread(STDIN, $header, $goal - length $header, length $header) > 0
+         or die "expected at least $goal bytes of input";
+   }
+   substr($header, 0, length $file_signature) eq $file_signature
+      or die "input does not appear to be encrypted by this tool";
+   $goal= hex substr($header, length $file_signature, 4);
+   while ($goal > length $header) {
+      sysread(STDIN, $header, $goal - length $header, length $header) > 0
+         or die "expected at least $goal bytes of input";
+   }
+   my (undef, $key, $opts, $salt)= split /\n/, $header, 4;
+   my $secret= create_secret($key, $salt);
+   # create a pipe and load it with the file-descriptor-3 data
+   $^F= 3; # pass fd 3 to child
+   my $fd3= load_string_into_pipe($secret);
+   dup2(fileno $fd3, 3);
+   # hand off to openssl to run directly on file handles
+   exec('openssl', 'enc', -d => @enc_opts, -pass => 'fd:3') or die "exec(openssl): $!";
+}
+
+sub load_string_into_pipe {
+   my $secret= shift;
+   # create a pipe and load it with the file-descriptor-3 data
+   pipe(my $r, my $w) or die "pipe: $!";
+   syswrite($w, $secret) == length $secret or die "write(pipe): $!";
+   close $w;
+   return $r;
+}
+
+# This can be done much nicer with IPC::Run, but that isn't a standard module.
+# Could also shell out to bash, but nice to have it work with ash in Alpine.
+sub capture_cmd_with_fds {
+   my ($fds, @cmd)= @_;
+   pipe(my $stdout_r, my $stdout_w) or die "pipe: $!";
+   defined(my $pid= fork) or die "fork: $!";
+   if ($pid) {
+      close $stdout_w;
+      # read stdout and return it
+      local $/= undef;
+      my $msg= <$stdout_r>;
+      waitpid($pid, 0);
+      $? == 0 or die "$cmd[0] failed";
+      return $msg;
+   }
+   else {
+      $^F= $#$fds if $#$fds > 2;
+      for (0..$#$fds) {
+         if (defined $fds->[$_]) {
+            if (!ref $fds->[$_]) {
+               my $pipe= load_string_into_pipe($fds->[$_]);
+               dup2(fileno($pipe), $_);
+            } else {
+               dup2(fileno($fds->[$_]), $_);
+            }
+         }
+      }
+      dup2(fileno($stdout_w), 1);
+      exec @cmd or die "exec('$cmd[0]'): $!";
+   }
+}
