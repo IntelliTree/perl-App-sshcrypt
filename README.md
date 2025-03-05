@@ -15,7 +15,7 @@ This allows you to store encrypted secrets on disk which can be
 automatically decrypted on demand so long as your ssh-agent and private
 key are available:
 
-  some-command --secret-from <(ssh-decrypt encrypted_file)
+    some-command --secret-from <(ssh-decrypt encrypted_file)
 
 As a reminder, you should only forward your ssh agent to servers which
 you trust, because a root user of that server can access your agent and
