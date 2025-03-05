@@ -6,12 +6,12 @@ use Pod::Usage;
 use Getopt::Long;
 use POSIX 'dup2';
 
-our $VERSION= 0.001;
+our $VERSION= 0.002;
 
 =head1 USAGE
 
-  ssh-crypt [-e|-d] [-s SALT] [-k KEY_PATTERN] <INPUT >OUTPUT
-  ssh-crypt [-e|-d] [-s SALT] [-k KEY_PATTERN] INPUT_FILE >OUTPUT
+  sshcrypt [-e|-d] [-s SALT] [-k KEY_PATTERN] <INPUT >OUTPUT
+  sshcrypt [-e|-d] [-s SALT] [-k KEY_PATTERN] INPUT_FILE >OUTPUT
   ssh-encrypt [-s SALT] [-k KEY_PATTERN] PLAINTEXT_FILE >CIPHERTEXT
   ssh-decrypt CIPHERTEXT_FILE >PLAINTEXT
   
@@ -40,7 +40,7 @@ During encryption, if you have multiple keys available, this selects the one you
 
 # specify all settings so openssl upgrades don't change encryption
 our @enc_opts= qw( -aes-256-cbc -md sha512 -pbkdf2 -iter 239823 );
-our $file_signature= sprintf("ssh-crypt %2.3f ", $VERSION);
+our $file_signature= sprintf("sshcrypt %6.3f ", $VERSION);
 
 my $mode;
 GetOptions(
@@ -115,7 +115,7 @@ sub decrypt {
       sysread(STDIN, $header, $goal - length $header, length $header) > 0
          or die "expected at least $goal bytes of input";
    }
-   substr($header, 0, length $file_signature) eq $file_signature
+   substr($header, 0, length $file_signature) =~ /^ssh-?crypt *([0-9.]+)/
       or die "input does not appear to be encrypted by this tool";
    $goal= hex substr($header, length $file_signature, 4);
    while ($goal > length $header) {
