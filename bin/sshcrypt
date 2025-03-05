@@ -65,6 +65,7 @@ $mode eq 'encrypt'? encrypt() : decrypt();
 sub get_ssh_pubkey {
    return $ENV{SSH_CRYPT_PUBKEY} if length $ENV{SSH_CRYPT_PUBKEY};
    my @keys= `ssh-add -L`;
+   $? == 0 or die "ssh-add -L failed: @keys";
    @keys= grep /$key_pattern/, @keys
       if defined $key_pattern;
    die "No ssh key ".(defined $key_pattern? "found matching pattern '$key_pattern'" : "available")
