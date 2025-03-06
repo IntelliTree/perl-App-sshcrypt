@@ -7,7 +7,7 @@ The encryption mechanism uses "ssh-keygen -Y" (which consults keys from
 your ssh-agent) to use your private key to sign a string of "salt" data,
 then uses the signature as a password for openssl symmetric encryption.
 The only way to re-create that symmetric key is to re-sign the same salt
-with the same pprivate key.  The salt, public key, and encryption
+with the same private key.  The salt, public key, and encryption
 parameters are written into the header of the encrypted file so that you
 don't need to add all these parameters to the decode command.
 
